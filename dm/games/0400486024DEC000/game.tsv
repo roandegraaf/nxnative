@@ -39,6 +39,7 @@ shader_note	Ocarina of Time shaders
 # ---- Frame rate ----
 # The game steps its time by a frame ratio, its base rate / its frame rate, whatever the frame took: frames longer than a vsync played in slow motion. The ratio takes the host's
 # frame step instead (MATCH_FRAME_STEP in patches.py, found by its function on any build that keeps it): 1 vsync at 60 fps, 2 when 60 does not hold, so game time = real time
+# (frames that are not whole vsyncs long: the stub takes the measured frame time when it is longer than that step, DM_FRAME_DELTA=0 turns that off)
 fps_target	60
 
 # ---- Graphics ----
@@ -52,3 +53,6 @@ tex_dirty_upload	on
 # The game's compute dispatches with no barrier of its between them run side by side (nvn_mtl.m dispatch_enc): on the kokiri-deck route GPU p50 15.63 -> 14.76 ms (docked,
 # Apple M4 Pro, three runs a side), the pictures alike
 dispatch_overlap	on
+# The game submits a frame's commands behind an event its CPU signals once the frame before has left the GPU, so the GPU starts each frame with nothing queued and waits for the
+# replay: with Metal encoding on its own thread a GPU-bound Hyrule Field scene went 55.3-55.8 -> 56.5-56.9 fps (Apple M4 Pro, three runs a side, interleaved)
+enc_thread	on

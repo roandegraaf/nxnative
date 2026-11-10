@@ -8,6 +8,11 @@ static int hid_usleep(useconds_t usec);
 #define clock_gettime hid_clock_gettime
 #define usleep hid_usleep
 #include "../hle_hid.c"
+int dm_amiibo_scan(const char *path) { (void)path; return 0; }
+void dm_amiibo_remove(void) {}
+int dm_mods_count(void) { return 0; }
+const char *dm_mods_name(int i) { (void)i; return ""; }
+void dm_mods_set(int i, int on) { (void)i; (void)on; }
 #undef clock_gettime
 #undef usleep
 #include "../pad_slots.h"
