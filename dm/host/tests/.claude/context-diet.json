@@ -1,0 +1,35 @@
+{
+  "_note": "written by context-diet on 2026-11-10; edit freely, an existing file is never regenerated except by /diet init",
+  "mcp": [
+    "Neon",
+    "afpunter-live",
+    "claude_ai_Higgsfield",
+    "higgsfield",
+    "coolify-personal",
+    "coolify",
+    "figma",
+    "freecad",
+    "home-assistant",
+    "mobbin",
+    "monitorzz",
+    "plugin_firebase_firebase",
+    "plugin_stripe_stripe"
+  ],
+  "skills": [
+    "stripe:*",
+    "hyperframes:*",
+    "kicad-happy:*",
+    "figma:*",
+    "impeccable:*",
+    "frontend-design:frontend-design",
+    "osmo:osmo",
+    "dezzign:dezzign",
+    "landing-page-audit",
+    "onboarding-wizard-design",
+    "payload",
+    "apple-design"
+  ],
+  "agents": [
+    "stripe:Company Researcher"
+  ]
+}

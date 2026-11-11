@@ -193,6 +193,32 @@ int main(void) {
         for (int i = 0; i < 1200; i++) { double gp = i < 600 || m.s.k == 1 ? 0.03 : 0.17, w = i < 600 ? 0.5 : 1.3; m.slow = nvn_fstep_gpu_slowed(&g, gp, m.s.k ? m.s.k : 1, 1, m.s.probe); slowed |= m.slow; run(&m, 1, w, 1, 3, 0); }
         check(m.s.k == 2 && !slowed && m.s.probes == 0, "GPU 0.03 → 0.17 under CPU lag: a GPU at 3 ms is not called slowed, no probe");
     }
+    {   // Ocarina of Time on a Mac: GPU 0.75 at hold 1, an area's load steps to 3, where the clock falls: 1.3 with a frame of 2.0 in every 12 (no 30 frames in a row fit hold 2), and 1.0 at hold 2
+        sim m = {0}; nvn_fgpu g = {0}; int at1 = 0, at3 = 0, at2 = 0;
+        for (int i = 0; i < 3000; i++) {
+            int k = m.s.k ? m.s.k : 1;
+            double w = i < 600 ? 0.75 : i < 603 ? 3.4 : k == 3 ? (i % 12 ? 1.3 : 2.0) : k == 2 ? 1.0 : at1++ < 20 ? 1.0 : 0.75;
+            at3 += i >= 603 && k == 3; at2 += i >= 603 && k == 2;
+            m.slow = nvn_fstep_gpu_slowed(&g, i >= 600 && i < 603 ? 0.75 : w, k, 1, m.s.probe);   // the load's late frames are the CPU's
+            run(&m, 1, w, 1, 3, 0);
+        }
+        snprintf(b, sizeof b, "frames over the fit at hold 3 (OoT): a trial to 2, a probe to 1 (k %d, failed %llu, %d frames at hold 3, %d at hold 2)", m.s.k, (unsigned long long)m.s.failed, at3, at2);
+        check(m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0 && at3 <= 40 && at2 <= 70, b);
+        sim c = {0};   // a mean that does not fit hold 2 keeps hold 3
+        run(&c, 600, 0.75, 1, 3, 0); run(&c, 3, 3.4, 1, 3, 0);
+        for (int i = 0; i < 2400; i++) run(&c, 1, i % 12 ? 1.75 : 2.0, 1, 3, 0);
+        check(c.s.k == 3 && c.s.downs == 0, "  a mean of 1.77 at hold 3 does not fit hold 2: no trial");
+    }
+    {   // a scene at the edge that holds 60 (0.8, one frame in 10 at 1.05, none late at hold 1): a hitch steps to 2 with nothing learned at hold 1 and the GPU as fast as before
+        sim m = {0}; int at2 = 0;
+        for (int i = 0; i < 3000; i++) {
+            double w = i >= 300 && i < 303 ? 1.4 : i % 10 ? 0.8 : 1.05;
+            at2 += i >= 303 && m.s.k == 2;
+            run(&m, 1, w, 1, 3, 0);
+        }
+        snprintf(b, sizeof b, "edge scene after a hitch (OoT): frames of 1.05 among 0.8 do not keep hold 2 (k %d, ups %llu, failed %llu, %d frames at hold 2)", m.s.k, (unsigned long long)m.s.ups, (unsigned long long)m.s.failed, at2);
+        check(m.s.k == 1 && m.s.ups == 1 && m.s.failed == 0 && at2 <= 40, b);
+    }
     {   // the GPU stays slow at hold 1 too: each probe fails, the reference stays the hold-1 time from before, and the probes spread out
         sim m = {0}; nvn_fgpu g = {0}; double last = 0, gaps[4]; int ng = 0; uint64_t probes = 0;
         for (int i = 0; i < 6000 && ng < 4; i++) {
@@ -358,6 +384,41 @@ int main(void) {
             }
             snprintf(b, sizeof b, what[c], first_len, (unsigned long long)m.s.failed);
             check(first_len == want[c] && m.s.k == 2 && m.s.failed == 1, b);
+        }
+    }
+    {   // the frame time a game steps by (nvn_fdelta_next)
+        nvn_fdelta f = {0}; uint64_t t = 1000; float v = 1;
+        check(nvn_fdelta_next(&f, t) == 0, "frame time: the first present has none");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 16666667);
+        check(v == 0, "frame time: 0 at 60 fps, the game's own step");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 50000000);
+        check(fabsf(v - 0.05f) < 0.0001f, "frame time: 50 ms at 20 fps");
+        v = nvn_fdelta_next(&f, t += 2000000000);
+        check(v > 0.05f && v < 0.0625f, "frame time: a 2 s stall counts 0.1 s in the mean");
+        for (int i = 0; i < 20; i++) v = nvn_fdelta_next(&f, t += 200000000);
+        check(fabsf(v - 4.0f / 60) < 0.0001f, "frame time: stops at 4 frames of 60 fps");
+    }
+    {   // a game that steps by max(step, measured): lost time is made up once (nvn_fstep_measured)
+        static const struct { double shown[20]; int n; uint64_t paid_min, paid_max; const char *name; } c[] = {
+            {{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2}, 20, 0, 1, "measured step: one late frame in 20 on a 60 Hz screen is made up by the measured time, no whole vsync"},
+            {{1.005}, 1, 20, 6000, "measured step: under 1.01 frames nothing is measured and whole vsyncs keep game time"},
+            {{1.07}, 1, 0, 1, "measured step: at 56 fps every frame steps 1.07, no whole vsync"},
+            {{1, 1, 1, 1.5}, 4, 0, 1, "measured step: a frame in four shown a 120 Hz refresh longer is spread over the frames around it"},
+            {{0.97, 1.03}, 2, 0, 0, "measured step: 60 fps with uneven intervals keeps the game's own step"},
+            {{1.2}, 1, 0, 1, "measured step: at 50 fps every frame steps 1.2"},
+            {{1, 1, 1, 1, 1, 1, 1, 2, 0.3, 0.7}, 10, 0, 6000, "measured step: a late frame the pacing makes up does not run the game ahead"},
+        };
+        for (unsigned q = 0; q < sizeof c / sizeof *c; q++) {
+            nvn_fstep s = {0}; nvn_fdelta f = {0}; uint64_t t = 1000; double real = 0, game = 0;
+            nvn_fdelta_next(&f, t);
+            for (int i = 0; i < 6000; i++) {
+                double shown = c[q].shown[i % c[q].n];
+                int n = nvn_fstep_next(&s, shown, 1.0, 1, 1, 0, 0);
+                double vs = nvn_fstep_measured(&s, nvn_fdelta_next(&f, t += (uint64_t)(shown * 16666667)) * 60.0);
+                n = s.step; game += vs > n ? vs : n;
+                if (i) real += shown;
+            }
+            check(fabs(game - real) < 2.5 && s.paid >= c[q].paid_min && s.paid <= c[q].paid_max, c[q].name);
         }
     }
     printf("== %d checks, %d failed ==\n", checks, fail);

@@ -2,7 +2,7 @@
 // Breath of the Wild 1.9.0) step the game by the vsyncs (1/60 s) the host hands them each frame, and the host keeps each frame on screen for k vsyncs (hle_nvn.c present_itv).
 // At a steady rate the step is the time on screen: even motion, and only steps the games' own interval logic uses (60 / 30 / 20 fps). Real time the game falls behind (a late
 // frame, a hitch) is a debt paid back one extra vsync per frame, so over time game time = real time. k follows the frames' cost: three late frames in a row step up to the cost
-// (30 fps when 60 does not hold: no 40 fps steps on 120 Hz screens); 30 frames in a row whose cost would fit k − 1 try it, and a trial that fails waits twice as long before
+// (30 fps when 60 does not hold: no 40 fps steps on 120 Hz screens); 30 frames in a row on time whose cost, or the mean cost of the hold's frames, would fit k − 1 try it, and a trial that fails waits twice as long before
 // the next (1 s → 8 s), so a device on the edge does not flap.
 // A probe is a trial back to kmin that the cost does not justify: while the caller reports the CPU slowed for reasons other than heat (an iPhone's performance controller
 // parks a game that waits out a long hold on the efficiency cores at half the clock, where its cost never fits k − 1 again), the hold-off alone starts one. Its first
@@ -21,6 +21,20 @@
 #pragma once
 #include <math.h>
 #include <stdint.h>
+
+// Frame time for a game that steps by it (Ocarina of Time's patches.py): the mean of the last NVN_FDELTA_N present intervals in seconds, or 0 at the target rate. A stall counts at most
+// 0.1 s, so a load does not jump the game forward, and the result stops at 4 frames of 60 fps; under 1.01 frames (59.4 fps) it is the target rate. The band was 1.1, which left 55 to 59 fps, where a GPU-bound game sits, to whole-vsync steps; the mean of 8 intervals and the debt gate of nvn_fstep_measured keep a steady 60 at the game's own step without it
+#define NVN_FDELTA_N 8
+typedef struct { uint64_t last; double t[NVN_FDELTA_N]; int n, i; } nvn_fdelta;
+static inline float nvn_fdelta_next(nvn_fdelta *f, uint64_t now_ns) {
+    uint64_t was = f->last; f->last = now_ns;
+    if (!was) return 0;
+    double s = (double)(now_ns - was) / 1e9, sum = 0;
+    f->t[f->i] = s > 0.1 ? 0.1 : s; f->i = (f->i + 1) % NVN_FDELTA_N; if (f->n < NVN_FDELTA_N) f->n++;
+    for (int i = 0; i < f->n; i++) sum += f->t[i];
+    double mean = sum / f->n;
+    return mean * 60 < 1.01 ? 0.0f : (float)fmin(mean, 4.0 / 60);
+}
 
 #define FSTEP_MAX 3           // the largest step: both games' own interval logic uses 1–3 (BotW clamps to [2, 3], TOTK picks 2 or 3), so their integer readers never see 4
 #define FSTEP_LATE 0.1        // a frame is late when it or its GPU work took this many vsyncs (1.7 ms) more than k: 53 fps is not 60 (start-to-start jitter on time is well below)
@@ -124,7 +138,11 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
         s->k = want; s->ups++; s->late_run = s->fit_run = 0; s->since = 0; s->probe = 0;
     } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; }   // the trial held (a probe's run at kmin is judged at the next step up)
-    if (!late) s->fit_run = s->k > kmin && cost <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
+    // A frame also fits k − 1 while the running mean of this hold's frames on time does: single frames over the fit among frames under it are
+    // what the shorter hold absorbs, and they kept the trial from ever starting (Ocarina of Time on a Mac after a load's late frames: 13.4 ms of GPU work at hold 2 with one
+    // frame in 20 over 14.2 ms, 30 fps for the rest of the scene where 60 had held; 22 ms at hold 3 under a lowered GPU clock with frames of 29–44 ms, 20 fps for 25 s)
+    double fitc = s->ck == s->k && s->cn && s->ccur < cost ? s->ccur : cost;
+    if (!late) s->fit_run = s->k > kmin && fitc <= FSTEP_FIT * (s->k - 1) ? s->fit_run + 1 : 0;
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = 0; }
     else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial) {   // probe: straight to kmin, so the controller sees the whole deadline
         s->k = kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
@@ -132,6 +150,18 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
     s->paid += s->step > s->k;
     return s->step;
+}
+
+// A game whose stub steps by the larger of the host's step and the measured frame time (vs, in vsyncs: nvn_fdelta_next; 0 = none). The measured time carries the time a late
+// frame lost over the frames after it, so no whole vsync is paid back beside it (both together ran the game ahead: a frame shown two vsyncs was paid back at once and again as
+// eight steps of 1.125), and the debt counts what the game stepped. The stub never steps less than the host's step, so the measured time is handed out only while the game is
+// behind: a late frame the pacing makes up with shorter ones lost no time, and its 1.125 ran the game 0.3 % fast (100 such frames in 1,800). While nothing is measured (under
+// 1.01 frames) the debt is paid back in whole vsyncs as without the stub. Called after nvn_fstep_next, whose step it corrects (s->step); returns the vsyncs to publish, 0 = none
+static inline double nvn_fstep_measured(nvn_fstep *s, double vs) {
+    if (vs <= 0 || s->debt <= 0) return 0;
+    if (s->step > s->k) { s->step = s->k; s->paid--; }
+    if (vs > s->step) s->debt -= vs - s->step;
+    return vs;
 }
 
 // The GPU clock follows the hold too: Breath of the Wild on an iPhone went from 14.4 to about 25 ms of GPU time a frame at hold 2 with the same 4,900 draws, the CPU still on its

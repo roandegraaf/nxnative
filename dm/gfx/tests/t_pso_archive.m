@@ -718,6 +718,20 @@ int main(int argc, char **argv) { @autoreleasepool {
         MTL4RenderPipelineDescriptor *u = pso_desc4(k1, 1, 0); MTL4LibraryFunctionDescriptor *uf = [MTL4LibraryFunctionDescriptor new];
         uf.library = [g_dev newLibraryWithSource:[src stringByAppendingString:@"// a library with no name\n"] options:nil error:&err]; uf.name = @"vs"; u.vertexFunctionDescriptor = uf;
         EXPECT("key: none for a library with no name", 0, arch_key(u));
+        {   // the same bytes under two file names: Metal gives one library object for both, so the tag is the content's and the key is the same whichever name was loaded last
+            NSString *tm = [@(dir) stringByAppendingPathComponent:@"twin.metal"], *ta = [@(dir) stringByAppendingPathComponent:@"twin_a.metallib"], *tb = [@(dir) stringByAppendingPathComponent:@"twin_b.metallib"];
+            [[src stringByAppendingString:@"// twins\n"] writeToFile:tm atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSTask *task = [NSTask new]; task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/xcrun"]; task.arguments = @[@"-sdk", @"macosx", @"metal", tm, @"-o", ta];
+            int built = [task launchAndReturnError:nil]; if (built) { [task waitUntilExit]; built = !task.terminationStatus; }
+            EXPECT("twins: the library compiled", 1, built && [NSFileManager.defaultManager copyItemAtPath:ta toPath:tb error:nil]);
+            MTL4LibraryFunctionDescriptor *tf = [MTL4LibraryFunctionDescriptor new]; tf.name = @"vs"; u.vertexFunctionDescriptor = tf;
+            id<MTLLibrary> la = lib_from_file(ta, &err); NSString *tag_a = la ? objc_getAssociatedObject(la, &g_lib_tag) : nil; tf.library = la; u.vertexFunctionDescriptor = tf; uint64_t key_a = arch_key(u);
+            id<MTLLibrary> lb = lib_from_file(tb, &err); NSString *tag_b = lb ? objc_getAssociatedObject(lb, &g_lib_tag) : nil; tf.library = lb; u.vertexFunctionDescriptor = tf; uint64_t key_b = arch_key(u);
+            tf.library = la; u.vertexFunctionDescriptor = tf;
+            EXPECT("twins: a tag for each, the same", 1, tag_a.length == 32 && [tag_a isEqualToString:tag_b]);
+            EXPECT("twins: the first one's key after the second was loaded is the key from before", 1, key_a && key_a == key_b && arch_key(u) == key_a);
+            EXPECT("twins: not the tag of another library", 0, [tag_a isEqualToString:objc_getAssociatedObject(g_lib, &g_lib_tag)]);
+        }
         uf.library = g_lib;
         uint64_t (^spec_key)(MTLFunctionConstantValues *) = ^uint64_t(MTLFunctionConstantValues *cv) {   // the descriptors copy what they are given: set, then assign
             MTL4SpecializedFunctionDescriptor *sf = [MTL4SpecializedFunctionDescriptor new]; sf.functionDescriptor = uf; sf.constantValues = cv; u.vertexFunctionDescriptor = sf;

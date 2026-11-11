@@ -874,6 +874,61 @@ static DmCheatsPanel *g_cheats_panel;   // created on the first Show Cheats Wind
     [g_cheats_panel show];
 }
 @end
+// Mods (hle_mods.c) and Amiibo (hle_sdk16.c) menus, rebuilt on every open
+@interface DmModsMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmModsMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    int n = dm_mods_count();
+    NSString *pack = nil;
+    for (int i = 0; i < n; i++) {
+        NSArray<NSString *> *parts = [@(dm_mods_name(i)) componentsSeparatedByString:@"/"];
+        if (parts.count > 1 && ![parts[0] isEqualToString:pack]) [menu addItemWithTitle:parts[0] action:nil keyEquivalent:@""].enabled = NO;
+        pack = parts.count > 1 ? parts[0] : nil;
+        NSMenuItem *it = [menu addItemWithTitle:parts.lastObject action:@selector(toggleMod:) keyEquivalent:@""];
+        if (dm_mods_exclusive(i)) it.toolTip = @"Replaces the same files as another mod of this pack: turning it on turns that one off";
+        it.target = self; it.tag = i; it.state = dm_mods_on(i) ? NSControlStateValueOn : NSControlStateValueOff; it.indentationLevel = pack ? 1 : 0;
+    }
+    if (!n) [menu addItemWithTitle:@"No mods in the mods folder" action:nil keyEquivalent:@""].enabled = NO;
+    if (dm_mods_edited()) [menu addItemWithTitle:@"Code patches and cheats change at the next start" action:nil keyEquivalent:@""].enabled = NO;
+    [menu addItem:[NSMenuItem separatorItem]];
+    const char *dir = dm_mods_dir_path();
+    NSMenuItem *op = [menu addItemWithTitle:@"Open Mods Folder" action:*dir ? @selector(openModsFolder:) : nil keyEquivalent:@""];
+    op.target = self; op.enabled = *dir != 0;
+}
+- (void)toggleMod:(NSMenuItem *)it { dm_mods_set((int)it.tag, !dm_mods_on((int)it.tag)); }
+- (void)openModsFolder:(NSMenuItem *)it {
+    (void)it; NSString *dir = @(dm_mods_dir_path());
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:dir isDirectory:YES]];
+}
+@end
+@interface DmAmiiboMenuDelegate : NSObject <NSMenuDelegate>
+@end
+@implementation DmAmiiboMenuDelegate
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    NSMenuItem *scan = [menu addItemWithTitle:@"Scan Amiibo…" action:@selector(scanAmiibo:) keyEquivalent:@"a"];
+    scan.target = self; scan.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    const char *name = dm_amiibo_name();
+    NSMenuItem *rm = [menu addItemWithTitle:name ? [NSString stringWithFormat:@"Remove %@", @(name)] : @"No amiibo on the reader" action:name ? @selector(removeAmiibo:) : nil keyEquivalent:@""];
+    rm.target = self; rm.enabled = name != NULL;
+}
+- (void)scanAmiibo:(NSMenuItem *)it {
+    (void)it; NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.message = @"Choose an amiibo dump (.bin)"; panel.allowsMultipleSelection = NO; panel.canChooseDirectories = NO;
+    [panel beginWithCompletionHandler:^(NSModalResponse r) {
+        if (r != NSModalResponseOK || !panel.URL) return;
+        if (!dm_amiibo_scan(panel.URL.fileSystemRepresentation)) {
+            NSAlert *a = [NSAlert new]; a.messageText = @"Not an amiibo dump";
+            a.informativeText = @"The file is not a raw amiibo image (a .bin of 520 to 572 bytes)."; [a runModal];
+        }
+    }];
+}
+- (void)removeAmiibo:(NSMenuItem *)it { (void)it; dm_amiibo_remove(); }
+@end
+static DmModsMenuDelegate *g_mods_menu; static DmAmiiboMenuDelegate *g_amiibo_menu;
 static DmCheatsMenuDelegate *g_cheats_menu;   // NSMenu keeps its delegate unretained
 
 @implementation DmCheatsPanel {
@@ -1532,7 +1587,15 @@ void front_run(void (*guest)(void)) {
         // stay unset: mode=default forces this layer's HUD on, so the Metal HUD menu's Hide HUD left it on screen
         if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) LOG("front end: Metal performance HUD on (DM_METAL_HUD)");
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
-        [win center];
+        NSScreen *home = nil; const char *ws = getenv("DM_WINDOW_SCREEN");
+        if (ws && *ws) {
+            NSArray<NSScreen *> *all = NSScreen.screens;
+            if (!strcmp(ws, "builtin")) { for (NSScreen *sc in all) if (CGDisplayIsBuiltin([sc.deviceDescription[@"NSScreenNumber"] unsignedIntValue])) { home = sc; break; } }
+            else if (atoi(ws) >= 0 && (NSUInteger)atoi(ws) < all.count) home = all[atoi(ws)];
+            if (home) LOG("front end: window on screen %s (DM_WINDOW_SCREEN=%s)", home.localizedName.UTF8String, ws); else LOG("[RED] front end: no screen for DM_WINDOW_SCREEN=%s", ws);
+        }
+        if (home) { NSRect vf = home.visibleFrame; [win setFrameOrigin:NSMakePoint(NSMidX(vf) - win.frame.size.width / 2, NSMidY(vf) - win.frame.size.height / 2)]; }
+        else [win center];
         [win makeKeyAndOrderFront:nil];
         screen_refresh(win.screen ?: NSScreen.mainScreen);
         g_win = win;
@@ -1558,6 +1621,17 @@ void front_run(void (*guest)(void)) {
         // Cheats menu has been opened once. Every open rebuilds them through the delegate as before
         [g_cheats_menu menuNeedsUpdate:cm];
         [[bar addItemWithTitle:@"Cheats" action:nil keyEquivalent:@""] setSubmenu:cm];
+        g_mods_menu = [DmModsMenuDelegate new];
+        NSMenu *mm = [[NSMenu alloc] initWithTitle:@"Mods"];
+        mm.delegate = g_mods_menu; mm.autoenablesItems = NO;
+        [[bar addItemWithTitle:@"Mods" action:nil keyEquivalent:@""] setSubmenu:mm];
+        if (dm_game_imports("_ZN2nn3nfp")) {
+            g_amiibo_menu = [DmAmiiboMenuDelegate new];
+            NSMenu *am = [[NSMenu alloc] initWithTitle:@"Amiibo"];
+            am.delegate = g_amiibo_menu; am.autoenablesItems = NO;
+            [g_amiibo_menu menuNeedsUpdate:am];   // so that the key equivalent exists before the menu is first opened
+            [[bar addItemWithTitle:@"Amiibo" action:nil keyEquivalent:@""] setSubmenu:am];
+        }
         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
